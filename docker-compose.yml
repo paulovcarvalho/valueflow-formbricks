@@ -91,7 +91,7 @@ x-environment: &environment
     S3_ACCESS_KEY: formbricks-access-key
     S3_SECRET_KEY: formbricks-secret-key-change-this-to-secure-password
     S3_REGION: us-east-1
-    S3_BUCKET_NAME: formbricks-uploads
+    S3_BUCKET_NAME: formbricks-storage
     S3_ENDPOINT_URL: https://files.formbricks.local
     S3_FORCE_PATH_STYLE: 1
 
@@ -225,7 +225,7 @@ services:
       MINIO_ROOT_USER: formbricks-access-key
       MINIO_ROOT_PASSWORD: formbricks-secret-key-change-this-to-secure-password
     volumes:
-      - minio-data:/data
+      - ./gcs-mount:/data
 
   formbricks:
     restart: always
@@ -233,12 +233,29 @@ services:
     depends_on:
       - postgres
       - redis
-      - minio
+      - rclone-s3
     volumes:
       - ./saml-connection:/home/nextjs/apps/web/saml-connection
       - uploads:/home/nextjs/apps/web/uploads/
       - ./certs/formbricks.crt:/usr/local/share/ca-certificates/formbricks.crt:ro
     <<: *environment
+
+  rclone-s3:
+    image: rclone/rclone:latest
+    restart: always
+    command: >
+      serve s3 gdrive:
+      --config /config/rclone.conf
+      --addr :9000
+      --vfs-cache-mode minimal
+      --s3-region us-east-1
+      --force-path-style
+      --log-level DEBUG
+    ports:
+      - "9000:9000"
+    volumes:
+      - ./rclone/config/rclone.conf:/config/rclone.conf:ro
+      - ./secrets:/secrets:ro
 
   nginx:
     restart: always
