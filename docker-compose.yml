@@ -260,7 +260,7 @@ services:
     image: nginx:alpine
     ports:
       - "80:80"
-      - "443:443"
+      - "453:443"
     volumes:
       - ./nginx-ssl.conf:/etc/nginx/nginx.conf:ro
       - ./certs:/etc/nginx/certs:ro
@@ -272,6 +272,8 @@ services:
         aliases:
           - formbricks.local
           - files.formbricks.local
+          - forms.vfi.eco
+          - files.vfi.eco
 
 volumes:
   postgres:

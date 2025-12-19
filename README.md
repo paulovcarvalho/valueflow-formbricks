@@ -1,215 +1,311 @@
-# Formbricks with Google Drive S3 Storage
+# Formbricks with Google Drive Storage via Tailscale
 
-## Overview
-
-This setup integrates Formbricks with Google Drive Shared Drive storage using rclone as an S3-compatible translation layer.
+Self-hosted Formbricks survey platform with Google Drive Shared Drive storage backend, accessible via public domain through Tailscale VPN.
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                         User Browser                             │
-│                               │                                  │
-│         ┌─────────────────────┼─────────────────────┐           │
-│         │                     │                     │           │
-│   http://localhost:3100 http://host.docker.internal:9000       │
-└─────────┼─────────────────────┼─────────────────────┼───────────┘
-          │                     │                     │
-          ▼                     │                     ▼
-  ┌──────────────┐             │          ┌───────────────────┐
-  │ nginx-proxy  │             │          │   rclone-s3       │
-  │  (port 3100) │             │          │   (port 9000)     │
-  └──────┬───────┘             │          └─────────┬─────────┘
-         │                     │                    │
-         ▼                     │                    ▼
-  ┌──────────────┐             │          ┌───────────────────┐
-  │  Formbricks  │─────────────┘          │  Google Drive     │
-  │  (port 3000) │                        │  Shared Drive     │
-  └──────────────┘                        │   "vfi-apps"      │
-                                          └───────────────────┘
+Public Internet (forms.vfi.eco)
+        ↓
+External Caddy Reverse Proxy (57.129.23.170)
+        ↓
+    Tailscale VPN
+        ↓
+Local Machine (Docker Containers)
+        ↓
+┌───────────────────────────────────────────────┐
+│ nginx (ports 80, 453)                         │
+│   ├─ HTTP → HTTPS redirect                    │
+│   ├─ HTTPS → Formbricks (forms.vfi.eco)      │
+│   └─ HTTPS → rclone-s3 (files.vfi.eco)       │
+└───────────────────────────────────────────────┘
+        ↓                           ↓
+┌──────────────┐          ┌─────────────────┐
+│  Formbricks  │          │   rclone-s3     │
+│  (port 3000) │          │   (port 9000)   │
+└──────┬───────┘          └────────┬────────┘
+       │                           │
+       ├─ PostgreSQL (5432)        │
+       ├─ Redis/Valkey (6379)      │
+       └─ MinIO Console (9001)     │
+                                   ↓
+                        Google Drive Shared Drive
+                             "vfi-apps"
 ```
 
 ## Services
 
-| Service | Image | Port | Purpose |
-|---------|-------|------|---------|
-| postgres | pgvector/pgvector:pg17 | 5432 | Database |
-| redis | valkey/valkey | 6379 | Cache & rate limiting |
-| rclone-s3 | rclone/rclone | 9000 | S3 API for Google Drive |
-| formbricks | formbricks:latest | 3000 | Main application |
-| formbricks-proxy | nginx:alpine | 3100 | CSP modification proxy |
+| Service | Port | Purpose |
+|---------|------|---------|
+| nginx | 80, 453 | Reverse proxy with SSL (port 453 mapped to internal 443) |
+| formbricks | 3000 | Survey application |
+| postgres | 5432 | Database (pgvector/pg17) |
+| redis | 6379 | Cache & rate limiting (Valkey) |
+| rclone-s3 | 9000 | S3 API gateway to Google Drive |
+| minio | 9001 | MinIO console (optional) |
 
-## Configuration
+## Domain Configuration
 
-### S3 Storage
-- **Endpoint**: `http://host.docker.internal:9000`
-- **Access Key**: `formbricks-access-key`
-- **Secret Key**: `formbricks-secret-key-change-this-to-secure-password`
-- **Bucket**: `formbricks`
-- **Region**: `us-east-1`
+### Public Domains
+- **Main App**: `https://forms.vfi.eco` → Formbricks UI
+- **File Storage**: `https://files.vfi.eco` → S3/Google Drive files
+- **DNS**: Points to `57.129.23.170` (external Caddy reverse proxy)
 
-### Google Drive
+### Network Flow
+1. Public domain resolves to external Caddy server
+2. Caddy connects to local machine via **Tailscale VPN**
+3. Caddy forwards HTTPS traffic to local port **453**
+4. nginx proxies to appropriate backend service
+
+### SSL Certificates
+- Certificate: `certs/formbricks.crt`
+- Private Key: `certs/formbricks.key`
+- SANs: `forms.vfi.eco`, `files.vfi.eco`, `formbricks.local`, `files.formbricks.local`
+
+## Storage Backend
+
+### Google Drive Integration
 - **Type**: Shared Drive (Team Drive)
 - **Name**: vfi-apps
-- **ID**: 0ANrWRo_JRi5mUk9PVA
-- **Service Account**: share-drive@sacred-flash-452501-m0.iam.gserviceaccount.com
-- **Config Path**: `rclone/config/rclone.conf`
-- **Credentials Path**: `secrets/sacred-flash-452501-m0-3eebf66010fe.json`
+- **Drive ID**: 0ANrWRo_JRi5mUk9PVA
+- **Service Account**: `share-drive@sacred-flash-452501-m0.iam.gserviceaccount.com`
+- **Credentials**: `secrets/sacred-flash-452501-m0-*.json` (not tracked in git)
+- **Config**: `rclone/config/rclone.conf`
 
-## How It Works
+### S3 Configuration
+```bash
+S3_ENDPOINT_URL=https://files.vfi.eco
+S3_BUCKET_NAME=formbricks-storage
+S3_REGION=us-east-1
+S3_FORCE_PATH_STYLE=1
+```
 
-1. **Server-side uploads** (Formbricks → S3):
-   - Formbricks uses `S3_ENDPOINT_URL=http://host.docker.internal:9000`
-   - Container resolves `host.docker.internal` to host machine
-   - Connects to rclone-s3 on port 9000
-   - rclone translates S3 API calls to Google Drive API
-
-2. **Client-side downloads** (Browser → S3):
-   - Formbricks generates presigned URLs: `http://host.docker.internal:9000/...`
-   - Browser uses these URLs to download files directly from rclone-s3
-   - nginx-proxy modifies CSP to allow `host.docker.internal:9000`
+rclone serves Google Drive over S3 API on port 9000, with nginx proxying external requests through SSL.
 
 ## Quick Start
 
+### Prerequisites
+1. **Tailscale** must be running and connected
+2. Google service account JSON in `secrets/` directory
+3. Environment variables in `.env` file
+
+### Start Services
 ```bash
-# Start all services
+# Ensure Tailscale is connected
+open -a Tailscale
+# Click "Connect" in menu bar
+
+# Start all containers
 docker-compose up -d
 
-# Check status
+# Verify status
 docker-compose ps
 
-# View logs
-docker-compose logs -f
-
-# Access Formbricks
-open http://localhost:3100
+# Check logs
+docker-compose logs -f formbricks
 ```
 
-## Testing File Uploads
+### Access
+- **Public URL**: https://forms.vfi.eco
+- **Local (for testing)**: http://localhost:80 (redirects to HTTPS)
 
-1. Navigate to [http://localhost:3100](http://localhost:3100)
-2. Create an account or login
-3. Create a survey with a file upload question
-4. Test uploading a file
-5. Verify the file appears in Google Drive Shared Drive "vfi-apps"
+## Configuration Files
+
+### Environment Variables (.env)
+```bash
+# Application URLs
+WEBAPP_URL=https://forms.vfi.eco
+NEXTAUTH_URL=https://forms.vfi.eco
+
+# Database
+DATABASE_URL=postgresql://postgres:postgres@postgres:5432/formbricks?schema=public
+
+# Security Keys (generated with: openssl rand -hex 32)
+NEXTAUTH_SECRET=<your-secret>
+ENCRYPTION_KEY=<your-key>
+CRON_SECRET=<your-secret>
+
+# S3 Storage
+S3_ACCESS_KEY=formbricks-access-key
+S3_SECRET_KEY=formbricks-secret-key-change-this-to-secure-password
+S3_REGION=us-east-1
+S3_BUCKET_NAME=formbricks-storage
+S3_ENDPOINT_URL=https://files.vfi.eco
+S3_FORCE_PATH_STYLE=1
+
+# OAuth (optional)
+GOOGLE_CLIENT_ID=<your-client-id>
+GOOGLE_CLIENT_SECRET=<your-client-secret>
+```
+
+### nginx Configuration (nginx-ssl.conf)
+- **Files Server** (first in config): `files.vfi.eco`, `files.formbricks.local`
+  - Proxies to `rclone-s3:9000`
+  - CORS origin allowlist for forms.vfi.eco
+  - Handles file uploads/downloads
+
+- **Formbricks Server**: `forms.vfi.eco`, `formbricks.local`
+  - Proxies to `formbricks:3000`
+  - Main application UI
+
+- **HTTP Redirect**: Redirects all HTTP to HTTPS
 
 ## Troubleshooting
 
-### Check S3 Endpoint
+### Forms.vfi.eco returns 502 Bad Gateway
 
+**Cause**: Tailscale VPN is disconnected
+
+**Solution**:
 ```bash
-# From host
-curl http://localhost:9000
-# Should return S3 error (expected)
+# Check Tailscale status
+/Applications/Tailscale.app/Contents/MacOS/Tailscale status
 
-# From Formbricks container
-docker-compose exec formbricks curl http://host.docker.internal:9000
-# Should return S3 error (expected)
+# If stopped, start it
+open -a Tailscale
+# Click "Connect" in menu bar
+
+# Wait 10 seconds, then test
+curl -I https://forms.vfi.eco/
 ```
 
-### Check Google Drive Connection
+### File uploads fail
 
+**Check rclone-s3 logs**:
 ```bash
-# View rclone logs
 docker-compose logs rclone-s3
+```
 
-# Test rclone manually
+**Test Google Drive connection**:
+```bash
 docker-compose exec rclone-s3 rclone ls gdrive:
 ```
 
-### Check CSP Headers
-
+**Verify nginx routing**:
 ```bash
-curl -I http://localhost:3100 | grep CSP
-# Should include: http://host.docker.internal:9000
+# Should return 403 (CORS protection working)
+curl -I -k https://localhost:453/ -H "Host: files.vfi.eco"
 ```
 
-### Common Issues
+### Local testing
 
-**Issue**: File uploads fail with CORS error
-- **Solution**: Check rclone-s3 logs for authentication errors
+**Test nginx locally**:
+```bash
+# Formbricks
+curl -I -k -H "Host: forms.vfi.eco" https://localhost:453/
 
-**Issue**: Browser blocks file downloads
-- **Solution**: Verify CSP includes `host.docker.internal:9000`
+# Files
+curl -I -k -H "Host: files.vfi.eco" https://localhost:453/
+```
 
-**Issue**: Formbricks can't connect to S3
-- **Solution**: Verify `host.docker.internal` resolves correctly in container
+**Test containers directly**:
+```bash
+# Formbricks
+docker exec valueflow-formbricks-nginx-1 wget -qO- http://formbricks:3000/
+
+# rclone-s3
+docker exec valueflow-formbricks-nginx-1 wget -qO- http://rclone-s3:9000/
+```
+
+### Database connection issues
+
+```bash
+# Check PostgreSQL is running
+docker-compose exec postgres psql -U postgres -d formbricks -c "SELECT 1;"
+
+# View Formbricks startup logs
+docker-compose logs formbricks | grep -i database
+```
+
+## Maintenance
+
+### Backup Database
+```bash
+docker-compose exec postgres pg_dump -U postgres formbricks > backup-$(date +%Y%m%d).sql
+```
+
+### Update Formbricks
+```bash
+docker-compose pull formbricks
+docker-compose up -d formbricks
+```
+
+### Restart Services
+```bash
+# Restart specific service
+docker-compose restart nginx
+
+# Restart all
+docker-compose restart
+
+# Full recreate (preserves volumes)
+docker-compose down
+docker-compose up -d
+```
+
+### View Logs
+```bash
+# All services
+docker-compose logs -f
+
+# Specific service
+docker-compose logs -f formbricks
+docker-compose logs -f nginx
+docker-compose logs -f rclone-s3
+
+# Last 50 lines
+docker-compose logs --tail 50 formbricks
+```
+
+## Security Notes
+
+1. **Secrets**: Never commit files in `secrets/` directory
+2. **Environment**: `.env` is gitignored - keep credentials secure
+3. **SSL**: Port 453 (not 443) is used to avoid conflicts
+4. **CORS**: Files endpoint has origin allowlist protection
+5. **Tailscale**: Provides encrypted VPN tunnel for external access
 
 ## File Structure
 
 ```
 valueflow-formbricks/
 ├── docker-compose.yml           # Main orchestration
-├── formbricks-proxy.conf        # nginx CSP proxy config
-├── nginx.conf                   # (not used, leftover)
+├── .env                         # Environment variables (gitignored)
+├── .env.example                # Template for .env
+├── nginx-ssl.conf              # nginx reverse proxy config
+├── nginx-ssl.conf.backup       # Backup of working config
+├── certs/
+│   ├── formbricks.crt          # SSL certificate
+│   └── formbricks.key          # SSL private key
 ├── rclone/
 │   └── config/
-│       └── rclone.conf          # Google Drive config
+│       └── rclone.conf         # Google Drive configuration
 ├── secrets/
-│   └── sacred-flash-*.json      # Service account key
-└── saml-connection/             # SAML config (if needed)
+│   ├── README.md               # Instructions
+│   └── *.json                  # Service account keys (gitignored)
+├── gcs-mount/                  # MinIO data directory
+└── saml-connection/            # SAML config (optional)
 ```
 
-## Environment Variables
+## Important Notes
 
-All configuration is in [docker-compose.yml](docker-compose.yml). Key variables:
+### Port 453 vs 443
+- **External**: Caddy forwards to port **453** on local machine
+- **Internal**: nginx listens on **443** inside container
+- **Mapping**: `453:443` in docker-compose.yml
+- **Reason**: Avoids conflicts with other services using 443
 
-- `WEBAPP_URL`: `http://localhost:3100`
-- `DATABASE_URL`: PostgreSQL connection string
-- `REDIS_URL`: Redis connection string
-- `S3_ENDPOINT_URL`: `http://host.docker.internal:9000`
-- `S3_ACCESS_KEY`: rclone authentication
-- `S3_SECRET_KEY`: rclone authentication
-- `S3_BUCKET_NAME`: `formbricks`
-- `S3_FORCE_PATH_STYLE`: `1` (required for rclone)
+### Tailscale Dependency
+**CRITICAL**: Tailscale must be running for external access to work. If Tailscale is stopped:
+- ✅ HTTP (port 80) still works (redirects to HTTPS)
+- ❌ HTTPS returns 502 Bad Gateway
+- External Caddy cannot reach local machine
 
-## Production Deployment
+**Always check Tailscale before troubleshooting 502 errors!**
 
-For production:
+## Links
 
-1. **Use a real domain** for S3:
-   ```
-   S3_ENDPOINT_URL: https://s3.yourdomain.com
-   ```
-
-2. **Setup SSL** certificates
-
-3. **Update CSP** to use your domain instead of `host.docker.internal`
-
-4. **Secure credentials**: Use Docker secrets or environment files
-
-5. **Monitor Google Drive API quota**
-
-## Maintenance
-
-### Backup Database
-
-```bash
-docker-compose exec postgres pg_dump -U postgres formbricks > backup.sql
-```
-
-### Update Formbricks
-
-```bash
-docker-compose pull formbricks
-docker-compose up -d formbricks
-```
-
-### Clean Restart
-
-```bash
-# Stop all services
-docker-compose down
-
-# Remove volumes (WARNING: deletes all data)
-docker volume rm valueflow-formbricks_postgres valueflow-formbricks_redis
-
-# Start fresh
-docker-compose up -d
-```
-
-## Sources
-
-- [Formbricks File Uploads Documentation](https://formbricks.com/docs/self-hosting/configuration/file-uploads)
-- [rclone Google Drive Documentation](https://rclone.org/drive/)
-- [MinIO Google Cloud Storage Integration](https://blog.min.io/minio-object-storage-running-on-the-google-cloud-platform/)
+- [Formbricks Documentation](https://formbricks.com/docs)
+- [rclone Google Drive Setup](https://rclone.org/drive/)
+- [Tailscale VPN](https://tailscale.com)
+- [pgvector Extension](https://github.com/pgvector/pgvector)
