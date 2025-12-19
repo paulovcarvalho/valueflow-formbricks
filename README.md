@@ -1,6 +1,6 @@
-# Formbricks with Google Drive Storage via Tailscale
+# Formbricks with MinIO Storage via Tailscale
 
-Self-hosted Formbricks survey platform with Google Drive Shared Drive storage backend, accessible via public domain through Tailscale VPN.
+Self-hosted Formbricks survey platform with MinIO S3-compatible local storage, accessible via public domain through Tailscale VPN.
 
 ## Architecture
 
@@ -17,20 +17,20 @@ Local Machine (Docker Containers)
 │ nginx (ports 80, 453)                         │
 │   ├─ HTTP → HTTPS redirect                    │
 │   ├─ HTTPS → Formbricks (forms.vfi.eco)      │
-│   └─ HTTPS → rclone-s3 (files.vfi.eco)       │
+│   └─ HTTPS → MinIO (files.vfi.eco)           │
 └───────────────────────────────────────────────┘
         ↓                           ↓
 ┌──────────────┐          ┌─────────────────┐
-│  Formbricks  │          │   rclone-s3     │
+│  Formbricks  │          │     MinIO       │
 │  (port 3000) │          │   (port 9000)   │
 └──────┬───────┘          └────────┬────────┘
        │                           │
        ├─ PostgreSQL (5432)        │
        ├─ Redis/Valkey (6379)      │
-       └─ MinIO Console (9001)     │
-                                   ↓
-                        Google Drive Shared Drive
-                             "vfi-apps"
+       │                           │
+       └─────────────────────────  ↓
+                        Local Persistent Storage
+                        (Docker volume: minio-data)
 ```
 
 ## Services
@@ -41,14 +41,13 @@ Local Machine (Docker Containers)
 | formbricks | 3000 | Survey application |
 | postgres | 5432 | Database (pgvector/pg17) |
 | redis | 6379 | Cache & rate limiting (Valkey) |
-| rclone-s3 | 9000 | S3 API gateway to Google Drive |
-| minio | 9001 | MinIO console (optional) |
+| minio | 9000, 9001 | S3-compatible object storage |
 
 ## Domain Configuration
 
 ### Public Domains
 - **Main App**: `https://forms.vfi.eco` → Formbricks UI
-- **File Storage**: `https://files.vfi.eco` → S3/Google Drive files
+- **File Storage**: `https://files.vfi.eco` → MinIO S3 API
 - **DNS**: Points to `57.129.23.170` (external Caddy reverse proxy)
 
 ### Network Flow
@@ -64,30 +63,47 @@ Local Machine (Docker Containers)
 
 ## Storage Backend
 
-### Google Drive Integration
-- **Type**: Shared Drive (Team Drive)
-- **Name**: vfi-apps
-- **Drive ID**: 0ANrWRo_JRi5mUk9PVA
-- **Service Account**: `share-drive@sacred-flash-452501-m0.iam.gserviceaccount.com`
-- **Credentials**: `secrets/sacred-flash-452501-m0-*.json` (not tracked in git)
-- **Config**: `rclone/config/rclone.conf`
+### MinIO Local Storage
+- **Type**: S3-compatible object storage
+- **Storage**: Docker volume `minio-data` (persistent)
+- **Bucket**: `formbricks-storage` (auto-created)
+- **Access**: Internal only (through nginx proxy)
+- **Console**: http://localhost:9001
 
 ### S3 Configuration
 ```bash
-S3_ENDPOINT_URL=https://files.vfi.eco
+S3_ENDPOINT_URL=https://forms.vfi.eco
 S3_BUCKET_NAME=formbricks-storage
 S3_REGION=us-east-1
 S3_FORCE_PATH_STYLE=1
 ```
 
-rclone serves Google Drive over S3 API on port 9000, with nginx proxying external requests through SSL.
+Files are stored in a persistent Docker volume and accessible through the nginx proxy at `https://forms.vfi.eco/formbricks-storage/`.
 
 ## Quick Start
 
 ### Prerequisites
 1. **Tailscale** must be running and connected
-2. Google service account JSON in `secrets/` directory
-3. Environment variables in `.env` file
+2. Environment variables in `.env` file
+3. **External Caddy** configured for `forms.vfi.eco`
+
+### External Reverse Proxy Setup
+
+Your external Caddy server only needs to handle `forms.vfi.eco`. File storage is proxied through the main domain at the `/formbricks-storage/` path, eliminating the need for a separate `files.vfi.eco` domain.
+
+On the external Caddy server (57.129.23.170), configure:
+
+```caddy
+forms.vfi.eco {
+    reverse_proxy <your-tailscale-ip>:453
+}
+```
+
+This simpler configuration:
+- ✅ Single domain, single certificate
+- ✅ File uploads work through `/formbricks-storage/` path on main domain
+- ✅ No separate `files.vfi.eco` configuration needed
+- ✅ No CSP violations (same origin)
 
 ### Start Services
 ```bash
@@ -107,7 +123,9 @@ docker-compose logs -f formbricks
 
 ### Access
 - **Public URL**: https://forms.vfi.eco
-- **Local (for testing)**: http://localhost:80 (redirects to HTTPS)
+- **MinIO Console**: http://localhost:9001
+  - Username: `formbricks-access-key`
+  - Password: (value from .env S3_SECRET_KEY)
 
 ## Configuration Files
 
@@ -125,12 +143,12 @@ NEXTAUTH_SECRET=<your-secret>
 ENCRYPTION_KEY=<your-key>
 CRON_SECRET=<your-secret>
 
-# S3 Storage
+# S3 Storage (MinIO)
 S3_ACCESS_KEY=formbricks-access-key
 S3_SECRET_KEY=formbricks-secret-key-change-this-to-secure-password
 S3_REGION=us-east-1
 S3_BUCKET_NAME=formbricks-storage
-S3_ENDPOINT_URL=https://files.vfi.eco
+S3_ENDPOINT_URL=http://minio:9000
 S3_FORCE_PATH_STYLE=1
 
 # OAuth (optional)
@@ -140,7 +158,7 @@ GOOGLE_CLIENT_SECRET=<your-client-secret>
 
 ### nginx Configuration (nginx-ssl.conf)
 - **Files Server** (first in config): `files.vfi.eco`, `files.formbricks.local`
-  - Proxies to `rclone-s3:9000`
+  - Proxies to `minio:9000`
   - CORS origin allowlist for forms.vfi.eco
   - Handles file uploads/downloads
 
@@ -171,20 +189,40 @@ curl -I https://forms.vfi.eco/
 
 ### File uploads fail
 
-**Check rclone-s3 logs**:
+**Error**: File upload returns 404 or timeout
+
+**Cause**: S3 endpoint URL not correctly configured or MinIO not reachable
+
+**Check MinIO logs**:
 ```bash
-docker-compose logs rclone-s3
+docker-compose logs minio
 ```
 
-**Test Google Drive connection**:
+**Test MinIO from Formbricks**:
 ```bash
-docker-compose exec rclone-s3 rclone ls gdrive:
+docker-compose exec formbricks curl http://minio:9000
 ```
 
 **Verify nginx routing**:
 ```bash
-# Should return 403 (CORS protection working)
+# Should return MinIO XML error
 curl -I -k https://localhost:453/ -H "Host: files.vfi.eco"
+```
+
+**Verify S3 endpoint**:
+```bash
+# Should return HTTP 403 (Access Denied - no credentials)
+curl -I https://forms.vfi.eco/formbricks-storage/
+
+# Check environment variable
+docker-compose exec formbricks env | grep S3_ENDPOINT_URL
+# Should show: S3_ENDPOINT_URL=https://forms.vfi.eco
+```
+
+**Check external access**:
+```bash
+# Test S3 proxy is accessible
+curl -I https://forms.vfi.eco/formbricks-storage/
 ```
 
 ### Local testing
@@ -194,8 +232,8 @@ curl -I -k https://localhost:453/ -H "Host: files.vfi.eco"
 # Formbricks
 curl -I -k -H "Host: forms.vfi.eco" https://localhost:453/
 
-# Files
-curl -I -k -H "Host: files.vfi.eco" https://localhost:453/
+# MinIO through /formbricks-storage/ proxy
+curl -I -k -H "Host: forms.vfi.eco" https://localhost:453/formbricks-storage/
 ```
 
 **Test containers directly**:
@@ -203,8 +241,8 @@ curl -I -k -H "Host: files.vfi.eco" https://localhost:453/
 # Formbricks
 docker exec valueflow-formbricks-nginx-1 wget -qO- http://formbricks:3000/
 
-# rclone-s3
-docker exec valueflow-formbricks-nginx-1 wget -qO- http://rclone-s3:9000/
+# MinIO
+docker exec valueflow-formbricks-nginx-1 wget -qO- http://minio:9000/
 ```
 
 ### Database connection issues
@@ -222,6 +260,21 @@ docker-compose logs formbricks | grep -i database
 ### Backup Database
 ```bash
 docker-compose exec postgres pg_dump -U postgres formbricks > backup-$(date +%Y%m%d).sql
+```
+
+### Backup MinIO Storage
+```bash
+# Backup MinIO data volume
+docker run --rm \
+  -v valueflow-formbricks_minio-data:/data \
+  -v $(pwd)/backup:/backup \
+  alpine tar czf /backup/minio-backup-$(date +%Y%m%d).tar.gz /data
+
+# Restore MinIO data
+docker run --rm \
+  -v valueflow-formbricks_minio-data:/data \
+  -v $(pwd)/backup:/backup \
+  alpine tar xzf /backup/minio-backup-YYYYMMDD.tar.gz -C /
 ```
 
 ### Update Formbricks
@@ -251,7 +304,7 @@ docker-compose logs -f
 # Specific service
 docker-compose logs -f formbricks
 docker-compose logs -f nginx
-docker-compose logs -f rclone-s3
+docker-compose logs -f minio
 
 # Last 50 lines
 docker-compose logs --tail 50 formbricks
@@ -259,11 +312,12 @@ docker-compose logs --tail 50 formbricks
 
 ## Security Notes
 
-1. **Secrets**: Never commit files in `secrets/` directory
+1. **Secrets**: Never commit `.env` file
 2. **Environment**: `.env` is gitignored - keep credentials secure
 3. **SSL**: Port 453 (not 443) is used to avoid conflicts
 4. **CORS**: Files endpoint has origin allowlist protection
 5. **Tailscale**: Provides encrypted VPN tunnel for external access
+6. **MinIO**: Console exposed only on localhost (not externally accessible)
 
 ## File Structure
 
@@ -271,20 +325,12 @@ docker-compose logs --tail 50 formbricks
 valueflow-formbricks/
 ├── docker-compose.yml           # Main orchestration
 ├── .env                         # Environment variables (gitignored)
-├── .env.example                # Template for .env
-├── nginx-ssl.conf              # nginx reverse proxy config
-├── nginx-ssl.conf.backup       # Backup of working config
+├── .env.example                 # Template for .env
+├── nginx-ssl.conf               # nginx reverse proxy config
 ├── certs/
-│   ├── formbricks.crt          # SSL certificate
-│   └── formbricks.key          # SSL private key
-├── rclone/
-│   └── config/
-│       └── rclone.conf         # Google Drive configuration
-├── secrets/
-│   ├── README.md               # Instructions
-│   └── *.json                  # Service account keys (gitignored)
-├── gcs-mount/                  # MinIO data directory
-└── saml-connection/            # SAML config (optional)
+│   ├── formbricks.crt           # SSL certificate
+│   └── formbricks.key           # SSL private key
+└── saml-connection/             # SAML config (optional)
 ```
 
 ## Important Notes
@@ -303,9 +349,33 @@ valueflow-formbricks/
 
 **Always check Tailscale before troubleshooting 502 errors!**
 
+### MinIO Storage
+- All uploaded files stored in Docker volume `minio-data`
+- Volume persists across container restarts
+- Located at: `/var/lib/docker/volumes/valueflow-formbricks_minio-data/_data`
+- Can be backed up using Docker commands (see Maintenance section)
+
+## Volumes
+
+All data is stored in Docker volumes:
+
+```bash
+# List volumes
+docker volume ls | grep formbricks
+
+# Inspect MinIO volume
+docker volume inspect valueflow-formbricks_minio-data
+
+# Volume names:
+# - postgres: Database data
+# - redis: Cache data
+# - minio-data: File uploads (S3 objects) - PERSISTENT
+# - uploads: Formbricks local uploads directory
+```
+
 ## Links
 
 - [Formbricks Documentation](https://formbricks.com/docs)
-- [rclone Google Drive Setup](https://rclone.org/drive/)
+- [MinIO Documentation](https://min.io/docs/)
 - [Tailscale VPN](https://tailscale.com)
 - [pgvector Extension](https://github.com/pgvector/pgvector)

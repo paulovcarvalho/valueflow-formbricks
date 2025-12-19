@@ -2,3 +2,6 @@
 .env
 secrets/*
 !secrets/README.md
+gcs-mount/
+nginx-*.conf.backup
+test-endpoints.sh
