@@ -250,7 +250,8 @@ services:
     image: nginx:alpine
     ports:
       - "80:80"
-      - "453:443"
+      - "453:443"  # Commented out for testing - uncomment if standard port doesn't work
+      #- "443:443"
     volumes:
       - ./nginx-ssl.conf:/etc/nginx/nginx.conf:ro
       - ./certs:/etc/nginx/certs:ro
@@ -262,8 +263,8 @@ services:
         aliases:
           - formbricks.local
           - files.formbricks.local
-          - forms.vfi.eco
-          - files.vfi.eco
+          - forms.valueflow.eco
+          - files.valueflow.eco
 
 volumes:
   postgres:

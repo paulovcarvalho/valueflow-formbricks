@@ -5,7 +5,7 @@ Self-hosted Formbricks survey platform with MinIO S3-compatible local storage, a
 ## Architecture
 
 ```
-Public Internet (forms.vfi.eco)
+Public Internet (forms.valueflow.eco)
         ↓
 External Caddy Reverse Proxy (57.129.23.170)
         ↓
@@ -16,8 +16,8 @@ Local Machine (Docker Containers)
 ┌───────────────────────────────────────────────┐
 │ nginx (ports 80, 453)                         │
 │   ├─ HTTP → HTTPS redirect                    │
-│   ├─ HTTPS → Formbricks (forms.vfi.eco)      │
-│   └─ HTTPS → MinIO (files.vfi.eco)           │
+│   ├─ HTTPS → Formbricks (forms.valueflow.eco)      │
+│   └─ HTTPS → MinIO (files.valueflow.eco)           │
 └───────────────────────────────────────────────┘
         ↓                           ↓
 ┌──────────────┐          ┌─────────────────┐
@@ -46,8 +46,8 @@ Local Machine (Docker Containers)
 ## Domain Configuration
 
 ### Public Domains
-- **Main App**: `https://forms.vfi.eco` → Formbricks UI
-- **File Storage**: `https://files.vfi.eco` → MinIO S3 API
+- **Main App**: `https://forms.valueflow.eco` → Formbricks UI
+- **File Storage**: `https://files.valueflow.eco` → MinIO S3 API
 - **DNS**: Points to `57.129.23.170` (external Caddy reverse proxy)
 
 ### Network Flow
@@ -59,7 +59,7 @@ Local Machine (Docker Containers)
 ### SSL Certificates
 - Certificate: `certs/formbricks.crt`
 - Private Key: `certs/formbricks.key`
-- SANs: `forms.vfi.eco`, `files.vfi.eco`, `formbricks.local`, `files.formbricks.local`
+- SANs: `forms.valueflow.eco`, `files.valueflow.eco`, `formbricks.local`, `files.formbricks.local`
 
 ## Storage Backend
 
@@ -72,29 +72,29 @@ Local Machine (Docker Containers)
 
 ### S3 Configuration
 ```bash
-S3_ENDPOINT_URL=https://forms.vfi.eco
+S3_ENDPOINT_URL=https://forms.valueflow.eco
 S3_BUCKET_NAME=formbricks-storage
 S3_REGION=us-east-1
 S3_FORCE_PATH_STYLE=1
 ```
 
-Files are stored in a persistent Docker volume and accessible through the nginx proxy at `https://forms.vfi.eco/formbricks-storage/`.
+Files are stored in a persistent Docker volume and accessible through the nginx proxy at `https://forms.valueflow.eco/formbricks-storage/`.
 
 ## Quick Start
 
 ### Prerequisites
 1. **Tailscale** must be running and connected
 2. Environment variables in `.env` file
-3. **External Caddy** configured for `forms.vfi.eco`
+3. **External Caddy** configured for `forms.valueflow.eco`
 
 ### External Reverse Proxy Setup
 
-Your external Caddy server only needs to handle `forms.vfi.eco`. File storage is proxied through the main domain at the `/formbricks-storage/` path, eliminating the need for a separate `files.vfi.eco` domain.
+Your external Caddy server only needs to handle `forms.valueflow.eco`. File storage is proxied through the main domain at the `/formbricks-storage/` path, eliminating the need for a separate `files.valueflow.eco` domain.
 
 On the external Caddy server (57.129.23.170), configure:
 
 ```caddy
-forms.vfi.eco {
+forms.valueflow.eco {
     reverse_proxy <your-tailscale-ip>:453
 }
 ```
@@ -102,7 +102,7 @@ forms.vfi.eco {
 This simpler configuration:
 - ✅ Single domain, single certificate
 - ✅ File uploads work through `/formbricks-storage/` path on main domain
-- ✅ No separate `files.vfi.eco` configuration needed
+- ✅ No separate `files.valueflow.eco` configuration needed
 - ✅ No CSP violations (same origin)
 
 ### Start Services
@@ -122,7 +122,7 @@ docker-compose logs -f formbricks
 ```
 
 ### Access
-- **Public URL**: https://forms.vfi.eco
+- **Public URL**: https://forms.valueflow.eco
 - **MinIO Console**: http://localhost:9001
   - Username: `formbricks-access-key`
   - Password: (value from .env S3_SECRET_KEY)
@@ -132,8 +132,8 @@ docker-compose logs -f formbricks
 ### Environment Variables (.env)
 ```bash
 # Application URLs
-WEBAPP_URL=https://forms.vfi.eco
-NEXTAUTH_URL=https://forms.vfi.eco
+WEBAPP_URL=https://forms.valueflow.eco
+NEXTAUTH_URL=https://forms.valueflow.eco
 
 # Database
 DATABASE_URL=postgresql://postgres:postgres@postgres:5432/formbricks?schema=public
@@ -157,12 +157,12 @@ GOOGLE_CLIENT_SECRET=<your-client-secret>
 ```
 
 ### nginx Configuration (nginx-ssl.conf)
-- **Files Server** (first in config): `files.vfi.eco`, `files.formbricks.local`
+- **Files Server** (first in config): `files.valueflow.eco`, `files.formbricks.local`
   - Proxies to `minio:9000`
-  - CORS origin allowlist for forms.vfi.eco
+  - CORS origin allowlist for forms.valueflow.eco
   - Handles file uploads/downloads
 
-- **Formbricks Server**: `forms.vfi.eco`, `formbricks.local`
+- **Formbricks Server**: `forms.valueflow.eco`, `formbricks.local`
   - Proxies to `formbricks:3000`
   - Main application UI
 
@@ -170,7 +170,7 @@ GOOGLE_CLIENT_SECRET=<your-client-secret>
 
 ## Troubleshooting
 
-### Forms.vfi.eco returns 502 Bad Gateway
+### Forms.valueflow.eco returns 502 Bad Gateway
 
 **Cause**: Tailscale VPN is disconnected
 
@@ -184,7 +184,7 @@ open -a Tailscale
 # Click "Connect" in menu bar
 
 # Wait 10 seconds, then test
-curl -I https://forms.vfi.eco/
+curl -I https://forms.valueflow.eco/
 ```
 
 ### File uploads fail
@@ -206,23 +206,23 @@ docker-compose exec formbricks curl http://minio:9000
 **Verify nginx routing**:
 ```bash
 # Should return MinIO XML error
-curl -I -k https://localhost:453/ -H "Host: files.vfi.eco"
+curl -I -k https://localhost:453/ -H "Host: files.valueflow.eco"
 ```
 
 **Verify S3 endpoint**:
 ```bash
 # Should return HTTP 403 (Access Denied - no credentials)
-curl -I https://forms.vfi.eco/formbricks-storage/
+curl -I https://forms.valueflow.eco/formbricks-storage/
 
 # Check environment variable
 docker-compose exec formbricks env | grep S3_ENDPOINT_URL
-# Should show: S3_ENDPOINT_URL=https://forms.vfi.eco
+# Should show: S3_ENDPOINT_URL=https://forms.valueflow.eco
 ```
 
 **Check external access**:
 ```bash
 # Test S3 proxy is accessible
-curl -I https://forms.vfi.eco/formbricks-storage/
+curl -I https://forms.valueflow.eco/formbricks-storage/
 ```
 
 ### Local testing
@@ -230,10 +230,10 @@ curl -I https://forms.vfi.eco/formbricks-storage/
 **Test nginx locally**:
 ```bash
 # Formbricks
-curl -I -k -H "Host: forms.vfi.eco" https://localhost:453/
+curl -I -k -H "Host: forms.valueflow.eco" https://localhost:453/
 
 # MinIO through /formbricks-storage/ proxy
-curl -I -k -H "Host: forms.vfi.eco" https://localhost:453/formbricks-storage/
+curl -I -k -H "Host: forms.valueflow.eco" https://localhost:453/formbricks-storage/
 ```
 
 **Test containers directly**:
