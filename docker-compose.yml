@@ -87,7 +87,7 @@ x-environment: &environment
 
     ################################################### OPTIONAL (STORAGE) ###################################################
 
-    # S3 Storage using MinIO (required for file uploads)
+    # S3 Storage using RustFS (required for file uploads)
     S3_ACCESS_KEY: ${S3_ACCESS_KEY}
     S3_SECRET_KEY: ${S3_SECRET_KEY}
     S3_REGION: ${S3_REGION}
@@ -190,9 +190,6 @@ x-environment: &environment
     # Configure the maximum age for the session in seconds. Default is 86400 (24 hours)
     # SESSION_MAX_AGE: 86400
 
-    # Trust local self-signed cert inside the container for internal HTTPS calls
-    NODE_EXTRA_CA_CERTS: /usr/local/share/ca-certificates/formbricks.crt
-
 services:
   postgres:
     restart: always
@@ -203,6 +200,12 @@ services:
       # Postgres DB Super User Password
       # Replace the below with your own secure password & Make sure the password matches the password field in DATABASE_URL above
       - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=formbricks
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d formbricks"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
 
   # Redis/Valkey service for caching, rate limiting, and audit logging
   # Remove this service if you want to use an external Redis/Valkey instance
@@ -212,66 +215,76 @@ services:
     command: valkey-server --appendonly yes
     volumes:
       - redis:/data
-    ports:
-      - "6379:6379"
 
-  minio:
+  rustfs:
     restart: always
-    image: minio/minio:latest
-    command: server /data --console-address :9001
+    image: quay.io/rustfs/rustfs:latest
+    platform: linux/amd64
+    command: ["rustfs", "--console-enable", "/data"]
     ports:
+      - "3000:3000"
+      - "9000:9000"
       - "9001:9001"
     environment:
-      MINIO_ROOT_USER: ${S3_ACCESS_KEY}
-      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY}
+      RUSTFS_ACCESS_KEY: ${S3_ACCESS_KEY}
+      RUSTFS_SECRET_KEY: ${S3_SECRET_KEY}
+      RUSTFS_VOLUMES: /data/rustfs0
+      RUSTFS_ADDRESS: "[::]:9000"
+      RUSTFS_CONSOLE_ADDRESS: "[::]:9001"
+      RUSTFS_CONSOLE_ENABLE: "true"
+      RUSTFS_CORS_ALLOWED_ORIGINS: "*"
+      RUSTFS_CONSOLE_CORS_ALLOWED_ORIGINS: "*"
+      RUSTFS_LOG_LEVEL: info
     volumes:
-      - minio-data:/data
+      - rustfs-data:/data
+      - rustfs-logs:/app/logs
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      test: ["CMD-SHELL", "ps -ef | grep -q '[r]ustfs'"]
       interval: 30s
-      timeout: 20s
-      retries: 3
+      timeout: 10s
+      retries: 5
+      start_period: 40s
+
+  rustfs-init:
+    restart: "no"
+    image: amazon/aws-cli:2.17.48
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - until aws --endpoint-url http://rustfs:9000 s3api list-buckets >/dev/null 2>&1; do sleep 2; done; aws --endpoint-url http://rustfs:9000 s3api head-bucket --bucket "$$S3_BUCKET_NAME" >/dev/null 2>&1 || aws --endpoint-url http://rustfs:9000 s3api create-bucket --bucket "$$S3_BUCKET_NAME"
+    environment:
+      AWS_ACCESS_KEY_ID: ${S3_ACCESS_KEY}
+      AWS_SECRET_ACCESS_KEY: ${S3_SECRET_KEY}
+      AWS_DEFAULT_REGION: ${S3_REGION}
+      S3_BUCKET_NAME: ${S3_BUCKET_NAME}
+    depends_on:
+      rustfs:
+        condition: service_healthy
 
   formbricks:
     restart: always
     image: ghcr.io/formbricks/formbricks:latest
+    network_mode: "service:rustfs"
     depends_on:
-      - postgres
-      - redis
-      - minio
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      rustfs-init:
+        condition: service_completed_successfully
     volumes:
       - ./saml-connection:/home/nextjs/apps/web/saml-connection
       - uploads:/home/nextjs/apps/web/uploads/
-      - ./certs/formbricks.crt:/usr/local/share/ca-certificates/formbricks.crt:ro
     <<: *environment
-
-  nginx:
-    restart: always
-    image: nginx:alpine
-    ports:
-      - "80:80"
-      - "453:443"  # Commented out for testing - uncomment if standard port doesn't work
-      #- "443:443"
-    volumes:
-      - ./nginx-ssl.conf:/etc/nginx/nginx.conf:ro
-      - ./certs:/etc/nginx/certs:ro
-    depends_on:
-      - formbricks
-      - minio
-    networks:
-      default:
-        aliases:
-          - formbricks.local
-          - files.formbricks.local
-          - forms.valueflow.eco
-          - files.valueflow.eco
 
 volumes:
   postgres:
     driver: local
   redis:
     driver: local
-  minio-data:
-    driver: local
   uploads:
+    driver: local
+  rustfs-data:
+    driver: local
+  rustfs-logs:
     driver: local

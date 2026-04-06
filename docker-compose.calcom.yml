@@ -1,0 +1,37 @@
+services:
+  calcom-postgres:
+    restart: always
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${CALCOM_POSTGRES_USER:-calcom}
+      POSTGRES_PASSWORD: ${CALCOM_POSTGRES_PASSWORD:-calcom}
+      POSTGRES_DB: ${CALCOM_POSTGRES_DB:-calcom}
+    volumes:
+      - calcom-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  calcom:
+    restart: always
+    image: calcom/cal.com:latest
+    depends_on:
+      calcom-postgres:
+        condition: service_healthy
+    ports:
+      - "3001:3000"
+    environment:
+      DATABASE_URL: ${CALCOM_DATABASE_URL:-postgresql://calcom:calcom@calcom-postgres:5432/calcom}
+      NEXTAUTH_URL: ${CALCOM_NEXTAUTH_URL:-http://localhost:3001/api/auth}
+      NEXT_PUBLIC_WEBAPP_URL: ${CALCOM_NEXT_PUBLIC_WEBAPP_URL:-http://localhost:3001}
+      NEXT_PUBLIC_WEBSITE_URL: ${CALCOM_NEXT_PUBLIC_WEBSITE_URL:-http://localhost:3001}
+      CALENDSO_ENCRYPTION_KEY: ${CALCOM_ENCRYPTION_KEY:-CHANGE_ME_GENERATE_32_BYTE_HEX}
+      NEXTAUTH_SECRET: ${CALCOM_NEXTAUTH_SECRET:-CHANGE_ME_GENERATE_32_BYTE_HEX}
+      NODE_ENV: production
+      ORGANIZATIONS_ENABLED: ${CALCOM_ORGANIZATIONS_ENABLED:-1}
+
+volumes:
+  calcom-postgres:
+    driver: local
